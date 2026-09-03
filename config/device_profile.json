@@ -1,0 +1,6 @@
+{
+  "hostname": "asus-notebook",
+  "device_type": "laptop",
+  "static_location": "auto",
+  "installed_tools": ["nmcli", "playerctl", "pactl", "gio"]
+}

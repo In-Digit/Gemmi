@@ -1,0 +1,47 @@
+{
+  "summary": "",
+  "history": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "привет"
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": "Ошибка обращения к Джеми: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "Привет"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "привет"
+        }
+      ]
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "text": "Привет-привет! 😊 Какая бодрая и слитная приветственная волна! \n\nНу что, Лёш, как твоё утро четверга? На часах уже половина одиннадцатого — вовсю кипит рабочая мысль программиста-аналитика, или ты пока только смакуешь кофе и настраиваешься на великие дела? Как настроение?"
+        }
+      ]
+    }
+  ],
+  "last_activity_time": 1788420774.3396854,
+  "is_paused": false
+}
