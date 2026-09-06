@@ -1,0 +1,194 @@
+{
+  "_comment": "Конфигурация Proactive Engine v1.0. Все параметры можно менять без перезапуска (при условии реализации горячей перезагрузки).",
+
+  "sensors": {
+    "active_window": {
+      "_comment": "Определение активного окна для Silence Guard и категоризации.",
+      "work_apps": [
+        "code", "cursor", "okular", "evince", "dolphin"
+      ],
+      "work_window_title_patterns": [
+        "Работа"
+      ],
+      "rest_apps": [
+        "firefox", "chromium", "chrome", "vlc", "mpv", "jemi"
+      ],
+      "rest_window_title_patterns": [
+        "YouTube", "VK Video", "Яндекс Музыка", "Radio Record"
+      ],
+      "detection_method": "wmctrl -l -x",
+      "fallback_method": "xdotool getactivewindow getwindowname"
+    },
+
+    "cpu_temperature": {
+      "_comment": "Формула оценки теплового комфорта: если нагрузка высокая, а температура низкая - холодно; если нагрузка низкая, а температура высокая - жарко.",
+      "load_average_interval_seconds": 60,
+      "load_high_threshold": 70,
+      "load_low_threshold": 20,
+      "temp_low_when_high_load": 45,
+      "temp_high_when_low_load": 70,
+      "sensor_source": "coretemp",
+      "fallback_sensor_source": "acpi"
+    },
+
+    "battery": {
+      "_comment": "Отслеживание заряда батареи. Если заряд ниже порога и не подключено зарядное устройство - событие.",
+      "enabled": true,
+      "low_battery_threshold": 20,
+      "check_charging_status": true
+    },
+
+    "geolocation": {
+      "_comment": "Определение местоположения по Wi-Fi SSID.",
+      "home_ssids": ["Tri-AL", "Tri-Al", "Tri-Al-5G"],
+      "work_ssids": ["KbKb"],
+      "other_location_label": "на ходу",
+      "check_method": "nmcli -t -f ACTIVE,SSID dev wifi | grep '^yes:'"
+    },
+
+    "weather": {
+      "_comment": "Погодный сервис и пороги событий.",
+      "provider": "OpenWeatherMap",
+      "city": "Ломоносов, Санкт-Петербург",
+      "api_key_env": "OPENWEATHER_API_KEY",
+      "poll_interval_minutes": 15,
+      "events": {
+        "rain_start": {"type": "condition_change", "weight": 4, "condition": "Rain"},
+        "snow_start": {"type": "condition_change", "weight": 4, "condition": "Snow"},
+        "precipitation_end": {"type": "condition_change", "from": ["Rain", "Snow"], "to": "Clear"},
+        "temp_change_5c_per_hour": {"type": "temp_change", "threshold": 5, "timeframe_hours": 1, "direction": "both"},
+        "wind_gust_storm": {"type": "wind_gust", "threshold_mps": 20, "change": "sudden"}
+      }
+    },
+
+    "alerts": {
+      "_comment": "Источники оповещений (БПЛА, МЧС и т.п.).",
+      "rss_feeds": [
+        "https://78.mchs.gov.ru/rss"
+      ],
+      "telegram_channels": [
+        "https://t.me/s/max_alert"
+      ],
+      "poll_interval_minutes": 15,
+      "keywords": ["БПЛА", "тревога", "опасность", "ракетная", "атака"]
+    },
+
+    "audio": {
+      "_comment": "Аудиостатус. Определяем только есть ли фоновый звук. Логика из instant_snapshot.py.",
+      "use_existing_logic": true,
+      "playerctl_check": true,
+      "pactl_check": true
+    }
+  },
+
+  "triggers": {
+    "silence_guard": {
+      "_comment": "Полный запрет инициативы, если пользователь активно работает.",
+      "active_work_app": true,
+      "idle_time_less_than_seconds": 300,
+      "block_proactive": true
+    },
+
+    "weights": {
+      "_comment": "Веса событий для накопления баллов. Суммарный балл за последние 30 минут сравнивается с порогом.",
+      "weather.rain_start": 4,
+      "weather.snow_start": 4,
+      "weather.precipitation_end": 3,
+      "weather.temp_change_5c_per_hour": 3,
+      "weather.wind_gust_storm": 4,
+      "temperature.cold": 3,
+      "temperature.hot": 3,
+      "alerts.keyword_detected": 10,
+      "silence_long": 1,
+      "battery_low": 2,
+      "location_changed": 1,
+      "schedule_work_to_evening": 1
+    },
+
+    "threshold": {
+      "_comment": "Порог срабатывания и окно накопления.",
+      "base_value": 3,
+      "window_minutes": 30,
+      "min_threshold": 1,
+      "max_threshold": 15
+    },
+
+    "critical_events": {
+      "_comment": "События, которые срабатывают всегда, кроме случаев Silence Guard.",
+      "always_trigger": ["alerts.keyword_detected"]
+    },
+
+    "frequency": {
+      "min_interval_between_initiatives_seconds": 1800,
+      "awaiting_response_timeout_seconds": 1800
+    },
+
+    "idle": {
+      "silence_long_threshold_seconds": 9000
+    }
+  },
+
+  "dynamic_thresholds": {
+    "_comment": "Динамическое изменение порога на основе реакций пользователя.",
+    "reaction_effects": {
+      "positive": {"change": -1, "min_threshold": 1},
+      "neutral": {"change": 0},
+      "negative_ignore": {"change": 2, "forgive_after_hours": 3},
+      "negative_explicit": {"change": 4, "forgive_after_hours": 6}
+    },
+    "recovery": {
+      "decrease_per_hour_without_negative": 1,
+      "min_threshold": 1,
+      "max_threshold": 15
+    }
+  },
+
+  "generation": {
+    "_comment": "Параметры генерации реплик.",
+    "use_llm": true,
+    "model_cascade": "default",
+    "style_variation_by_user_state": true,
+    "max_replica_length": 0,
+    "avoid_repetition": false,
+    "system_prompt_suffix": "Ты — проактивный ассистент. Твоя задача — мягко и уместно начать короткий диалог, основываясь на контексте и событиях. Не будь навязчивым, используй эвристику сомнения (мягкие предположения, а не утверждения)."
+  },
+
+  "schedule": {
+    "_comment": "Расписание и окна тишины.",
+    "work_days": [1,2,3,4,5],
+    "possible_work_saturdays": true,
+    "work_hours": {"start": "08:00", "end": "18:00"},
+    "silence_windows": [
+      {"days": [1,2,3,4,5], "start": "17:45", "end": "21:30"},
+      {"days": [6], "start": "00:00", "end": "23:59", "if_work_saturday": true}
+    ],
+    "sunday_silence": true,
+    "timezone": "Europe/Moscow"
+  },
+
+  "api": {
+    "_comment": "Общие настройки API.",
+    "weather_api_key_env": "OPENWEATHER_API_KEY",
+    "weather_base_url": "https://api.openweathermap.org/data/2.5/weather",
+    "rss_fetch_timeout_seconds": 10,
+    "telegram_fetch_timeout_seconds": 10,
+    "retry_on_error_minutes": 5
+  },
+
+  "interaction": {
+    "_comment": "Взаимодействие с основным приложением.",
+    "queue_file": "~/gemini_companion/data/proactive_queue.json",
+    "queue_format": "json_lines",
+    "if_app_not_running": "do_not_queue",
+    "tts_enabled": false,
+    "tts_engine": "piper"
+  },
+
+  "state": {
+    "_comment": "Хранение состояния и истории реакций.",
+    "history_file": "~/gemini_companion/data/proactive_history.json",
+    "history_retention_days": 30,
+    "state_file": "~/gemini_companion/data/proactive_state.json",
+    "hot_reload_config": true
+  }
+}

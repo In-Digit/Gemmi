@@ -10,11 +10,13 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_PATH = os.path.join(APP_DIR, "app.py")
 ICON_PATH = os.path.join(APP_DIR, "icon.png")
+PROACTIVE_DAEMON_PATH = os.path.join(APP_DIR, "run_proactive_daemon.py")
 
 class JemiWindow(QMainWindow):
-    def __init__(self, server_process):
+    def __init__(self, server_process, daemon_process):
         super().__init__()
         self.server_process = server_process
+        self.daemon_process = daemon_process
         self.setWindowTitle("✨ Джеми")
         self.resize(500, 750)
 
@@ -63,24 +65,47 @@ class JemiWindow(QMainWindow):
         self.hide()
 
     def full_quit(self):
-        # Корректно убиваем фоновый сервер и выходим
-        if self.server_process:
+        # Корректно завершаем демон и сервер
+        if self.daemon_process and self.daemon_process.poll() is None:
+            self.daemon_process.terminate()
+            try:
+                self.daemon_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.daemon_process.kill()
+        if self.server_process and self.server_process.poll() is None:
             self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
         QApplication.quit()
 
 def main():
+    # Запускаем Streamlit сервер
     server_process = subprocess.Popen(
         [sys.executable, "-m", "streamlit", "run", APP_PATH, "--server.headless", "true"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
 
+    # Запускаем Proactive Engine демон (если файл существует)
+    daemon_process = None
+    if os.path.exists(PROACTIVE_DAEMON_PATH):
+        daemon_process = subprocess.Popen(
+            [sys.executable, PROACTIVE_DAEMON_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("Proactive Engine демон запущен.")
+    else:
+        print("Файл run_proactive_daemon.py не найден. Демон не запущен.")
+
     time.sleep(2.5)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    window = JemiWindow(server_process)
+    window = JemiWindow(server_process, daemon_process)
     window.show()
 
     sys.exit(app.exec())

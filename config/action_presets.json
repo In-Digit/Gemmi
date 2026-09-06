@@ -1,0 +1,11 @@
+{
+  "статус сети": "nmcli connection show --active",
+  "текущий трек": "playerctl metadata --format '{{ artist }} - {{ title }}'",
+  "свободное место": "df -h /",
+  "загрузка цп": "top -bn1 | head -n 5",
+  "радио рекорд": "if [ -f ~/.mpv_radio.pid ]; then kill \"$(cat ~/.mpv_radio.pid)\" 2>/dev/null; fi; nohup mpv --no-video --input-ipc-server=/tmp/mpv_socket \"https://radiorecord.hostingradio.ru/rr_main96.aacp\" >/dev/null 2>&1 & echo $! > ~/.mpv_radio.pid",
+  "стоп радио": "if [ -f ~/.mpv_radio.pid ]; then kill \"$(cat ~/.mpv_radio.pid)\" 2>/dev/null; rm ~/.mpv_radio.pid; fi",
+  "громче": "playerctl --player=mpv volume 0.1+",
+  "тише": "playerctl --player=mpv volume 0.1-",
+  "выключить звук": "pactl set-sink-mute @DEFAULT_SINK@ toggle"
+}
