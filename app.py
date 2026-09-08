@@ -1,25 +1,11 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Графический интерфейс ассистента «Джеми» на Streamlit.
-Обеспечивает:
-- отображение диалога (с возможностью сворачивания старых сообщений);
-- отправку запросов модели с индикацией прогресса;
-- обработку проактивных сообщений и реакций пользователя;
-- автоматическую повторную отправку неотвеченного последнего сообщения;
-- выполнение команд exec_bash и web_search;
-- ручной запуск анализа фактов о пользователе;
-- фоновую проверку новых проактивных сообщений через JavaScript-поллинг;
-- приватный режим «Мы не одни»;
-- flash-режим (промпт начинается с **) — запрос без контекста, ответ не сохраняется.
-"""
-
+# /home/mrak/gemini_companion/app.py
 import os
 import re
 import sys
 import json
 import time
+import socket
+import subprocess
 from datetime import datetime
 import streamlit as st
 import streamlit.components.v1 as components
@@ -32,6 +18,7 @@ from modules.llm_client import ask_gemini
 from modules.bash_executor import BashExecutor
 from modules.web_search import search_web, fetch_page_content
 from modules.user_facts_manager import UserFactsManager
+from modules.media_player import MediaPlayer
 
 # --- Конфигурация страницы и стили ---
 st.set_page_config(page_title="Джеми", page_icon="✨", layout="wide")
@@ -60,18 +47,6 @@ st.markdown("""
             background-color: #4a5568;
             border-color: #718096;
         }
-        .proactive-message {
-            background-color: #2a2f3a;
-            border-left: 4px solid #6c5ce7;
-            padding: 8px 12px;
-            border-radius: 6px;
-            margin: 4px 0;
-        }
-        .proactive-label {
-            color: #a29bfe;
-            font-size: 0.8em;
-            font-weight: bold;
-        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -82,27 +57,112 @@ if "bash_executor" not in st.session_state:
     st.session_state.bash_executor = BashExecutor()
 if "user_facts_manager" not in st.session_state:
     st.session_state.user_facts_manager = UserFactsManager()
+if "media_player" not in st.session_state:
+    st.session_state.media_player = MediaPlayer()
 if "show_full_history" not in st.session_state:
     st.session_state.show_full_history = False
 if "auto_resend_attempted" not in st.session_state:
     st.session_state.auto_resend_attempted = False
 if "private_mode" not in st.session_state:
     st.session_state.private_mode = False
+if "show_debug_logs" not in st.session_state:
+    st.session_state.show_debug_logs = False
 
 ctx = st.session_state.context_manager
 executor = st.session_state.bash_executor
 facts_manager = st.session_state.user_facts_manager
+media = st.session_state.media_player
 
-# --- Файлы для обмена с Proactive Engine ---
+# --- Пути к файлам обмена ---
 PROACTIVE_QUEUE_FILE = os.path.expanduser("~/gemini_companion/data/proactive_queue.json")
 PROACTIVE_FLAG_FILE = os.path.expanduser("~/gemini_companion/data/proactive_pending_flag.json")
 PROACTIVE_REACTION_FILE = os.path.expanduser("~/gemini_companion/data/proactive_reaction.json")
+INTERACTION_FILE = os.path.expanduser("~/gemini_companion/data/interaction_state.json")
+HISTORY_FILE_PATH = os.path.expanduser("~/gemini_companion/history.json")
+
+VOICE_CONFIG_FILE = os.path.expanduser("~/gemini_companion/config/voice_config.json")
+VOICE_INPUT_FILE = os.path.expanduser("~/gemini_companion/data/voice_input.json")
+VOICE_RESPONSE_FILE = os.path.expanduser("~/gemini_companion/data/voice_response.json")
+VOICE_ERROR_FILE = os.path.expanduser("~/gemini_companion/data/voice_error.json")
 
 
 # --- Вспомогательные функции ---
 
+def get_local_ip() -> str:
+    """Определяет актуальный локальный IP-адрес машины в сети."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+def is_port_open(port: int) -> bool:
+    """Проверяет, слушается ли указанный TCP-порт на localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(('localhost', port)) == 0
+
+
+def touch_user_interaction():
+    """Обновляет время взаимодействия пользователя для предотвращения ложных проактивных срабатываний."""
+    state = {
+        "last_interaction": datetime.now().isoformat(),
+        "prompt_status": "idle",
+        "last_prompt_time": None
+    }
+    try:
+        os.makedirs(os.path.dirname(INTERACTION_FILE), exist_ok=True)
+        with open(INTERACTION_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения interaction_state: {e}")
+
+
+def load_voice_config_ui() -> dict:
+    if os.path.exists(VOICE_CONFIG_FILE):
+        try:
+            with open(VOICE_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"mode": "text_text"}
+
+
+def save_voice_config_ui(cfg: dict):
+    os.makedirs(os.path.dirname(VOICE_CONFIG_FILE), exist_ok=True)
+    try:
+        with open(VOICE_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения voice_config: {e}")
+
+
+def check_voice_input_queue() -> str:
+    """Проверяет, появился ли распознанный текст от голосового ассистента."""
+    if os.path.exists(VOICE_INPUT_FILE):
+        try:
+            with open(VOICE_INPUT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            os.remove(VOICE_INPUT_FILE)
+            return data.get("text", "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def send_to_tts_queue(text: str):
+    """Отправляет текст ответа Джемми в очередь озвучивания."""
+    try:
+        os.makedirs(os.path.dirname(VOICE_RESPONSE_FILE), exist_ok=True)
+        with open(VOICE_RESPONSE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"text": text, "timestamp": datetime.now().isoformat()}, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"Ошибка записи в voice_response: {e}")
+
+
 def generate_summary_from_history(history):
-    """Создает краткую выжимку из истории диалога (для сжатия при простое)."""
     if not history:
         return ""
     formatted_dialog = []
@@ -121,8 +181,6 @@ def generate_summary_from_history(history):
 
 
 def process_proactive_queue():
-    """Читает proactive_queue.json, добавляет сообщения в историю и очищает файл.
-    Устанавливает флаг ожидания реакции."""
     if not os.path.exists(PROACTIVE_QUEUE_FILE):
         return
     try:
@@ -154,7 +212,6 @@ def process_proactive_queue():
 
 
 def handle_proactive_reaction(user_input):
-    """Классифицирует ответ пользователя на проактивное сообщение и записывает реакцию."""
     if not os.path.exists(PROACTIVE_FLAG_FILE):
         return
     try:
@@ -181,41 +238,130 @@ def handle_proactive_reaction(user_input):
 
 
 def execute_bash_blocks(response_text):
-    """Извлекает и выполняет блоки exec_bash, возвращает дополнительные результаты."""
     bash_blocks = re.findall(r"```exec_bash\s*\n(.*?)\n```", response_text, re.DOTALL)
-    exec_results = []
+    results = []
     for cmd in bash_blocks:
-        success, result = executor.execute(cmd)
+        cmd_clean = cmd.strip()
+        success, output = executor.execute(cmd_clean)
         status_icon = "✅" if success else "❌"
-        exec_results.append(f"\n\n{status_icon} **[Выполнение команды]** `{cmd}`:\n```\n{result}\n```")
-    return exec_results
+        results.append({
+            "type": "bash",
+            "command": cmd_clean,
+            "success": success,
+            "output": output,
+            "log": f"{status_icon} **[Команда]** `{cmd_clean}`\n```\n{output}\n```"
+        })
+    return results
 
 
 def execute_web_blocks(response_text):
-    """Извлекает и выполняет блоки web_search, возвращает дополнительные результаты."""
     web_blocks = re.findall(r"```web_search\s*\n(.*?)\n```", response_text, re.DOTALL)
-    exec_results = []
+    results = []
     for query in web_blocks:
-        query = query.strip()
-        if query.startswith("http://") or query.startswith("https://"):
-            page_text = fetch_page_content(query)
-            exec_results.append(f"\n\n🌐 **[Чтение URL]** `{query}`:\n```text\n{page_text}\n```")
+        query_clean = query.strip()
+        if query_clean.startswith("http://") or query_clean.startswith("https://"):
+            page_text = fetch_page_content(query_clean)
+            results.append({
+                "type": "web_fetch",
+                "query": query_clean,
+                "output": page_text,
+                "log": f"🌐 **[Чтение URL]** `{query_clean}`\n```text\n{page_text[:1000]}...\n```"
+            })
         else:
-            search_results = search_web(query)
-            if isinstance(search_results, list) and len(search_results) > 0 and "error" not in search_results[0]:
-                formatted_search = "\n".join([f"- **{r.get('title', 'Без названия')}**: {r.get('body', '')} ({r.get('href', '')})" for r in search_results])
-                exec_results.append(f"\n\n🔍 **[Поиск в сети]** `{query}`:\n{formatted_search}")
+            search_data = search_web(query_clean)
+            if isinstance(search_data, list) and len(search_data) > 0 and "error" not in search_data[0]:
+                formatted_search = "\n".join([
+                    f"- {r.get('title', 'Без названия')}: {r.get('body', '')}"
+                    for r in search_data
+                ])
+                results.append({
+                    "type": "web_search",
+                    "query": query_clean,
+                    "output": formatted_search,
+                    "log": f"🔍 **[Поиск]** `{query_clean}` ({len(search_data)} рез.)"
+                })
             else:
-                err_msg = search_results[0].get("error", "Ничего не найдено") if search_results else "Ничего не найдено"
-                exec_results.append(f"\n\n⚠️ **[Ошибка поиска]** `{query}`:\n{err_msg}")
-    return exec_results
+                err_msg = search_data[0].get("error", "Ничего не найдено") if search_data else "Ничего не найдено"
+                results.append({
+                    "type": "web_search",
+                    "query": query_clean,
+                    "output": err_msg,
+                    "log": f"⚠️ **[Ошибка поиска]** `{query_clean}`: {err_msg}"
+                })
+    return results
 
 
-# --- Проверяем очередь и таймаут перед отображением ---
+def run_tool_loop(initial_payload, status_placeholder):
+    def on_progress(model, status_text):
+        status_placeholder.markdown(f"🔄 **Модель:** `{model}` — **Статус:** {status_text}")
+
+    first_response = ask_gemini(initial_payload, progress_callback=on_progress)
+    if first_response.startswith("Ошибка:"):
+        status_placeholder.empty()
+        return False, first_response, []
+
+    tool_logs = []
+    bash_results = execute_bash_blocks(first_response)
+    web_results = execute_web_blocks(first_response)
+    all_tools = bash_results + web_results
+
+    if not all_tools:
+        status_placeholder.empty()
+        return True, first_response, []
+
+    for item in all_tools:
+        tool_logs.append(item["log"])
+
+    tool_feedback = ["--- ДАННЫЕ ИЗ СЕТИ / СИСТЕМЫ (ПОЛУЧЕНЫ ТОЛЬКО ЧТО) ---"]
+    for item in all_tools:
+        if item["type"] == "bash":
+            tool_feedback.append(f"Команда `{item['command']}` дала результат:\n{item['output']}")
+        elif item["type"] == "web_search":
+            tool_feedback.append(f"Поиск по теме `{item['query']}` нашел следующее:\n{item['output']}")
+        elif item["type"] == "web_fetch":
+            tool_feedback.append(f"Текст со страницы `{item['query']}`:\n{item['output']}")
+
+    tool_feedback.append(
+        "----------------------------------------------------\n"
+        "ВАЖНЕЙШАЯ ИНСТРУКЦИЯ ПО ОТВЕТУ:\n"
+        "Ты — Джемми, общаешься с Алексеем лично, тепло, по-свойски и с легким юмором.\n"
+        "На основе данных выше ответь ему человеческим языком, словно ты сама это знаешь или только что выглянула в окно.\n"
+        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:\n"
+        "- Отвечать сухой ссылкой на сайт или фразой 'вот ссылка'.\n"
+        "- Выводить блоки кода exec_bash или web_search.\n"
+        "- Писать техническим канцелярским языком.\n"
+        "Если в данных есть градусы/ветер/осадки — назови их и прокомментируй по-живому."
+    )
+
+    second_payload = json.loads(json.dumps(initial_payload))
+    second_payload["contents"].append({"role": "model", "parts": [{"text": first_response}]})
+    second_payload["contents"].append({"role": "user", "parts": [{"text": "\n\n".join(tool_feedback)}]})
+
+    status_placeholder.markdown("✨ **Джеми:** заглянула, сейчас скажу...")
+    final_response = ask_gemini(second_payload, progress_callback=on_progress)
+    status_placeholder.empty()
+
+    if final_response.startswith("Ошибка:"):
+        fallback_msg = "У меня почему-то сорвалась мысль, пока я смотрела... Спроси меня ещё разок, пожалуйста!"
+        return False, fallback_msg, tool_logs
+
+    return True, final_response, tool_logs
+
+
+# --- Синхронизация и таймаут ---
 process_proactive_queue()
 ctx.check_timeout(summarize_func=generate_summary_from_history)
 
-# --- Автоматическая повторная отправка последнего сообщения, если нет ответа ---
+# Проверяем не пришел ли текст с голоса
+voice_text = check_voice_input_queue()
+if voice_text and not st.session_state.get("active_voice_input_processed"):
+    st.session_state.active_voice_input_processed = True
+    user_input = voice_text
+else:
+    user_input = None
+
+
+# --- Автоматическая повторная отправка последнего сообщения ---
 if not st.session_state.auto_resend_attempted and ctx.history and ctx.history[-1]["role"] == "user":
     st.session_state.auto_resend_attempted = True
     last_user_text = ctx.history[-1]["parts"][0].get("text", "")
@@ -224,23 +370,95 @@ if not st.session_state.auto_resend_attempted and ctx.history and ctx.history[-1
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
             message_placeholder = st.empty()
-            def on_progress(model, status_text):
-                status_placeholder.markdown(f"🔄 **Модель:** `{model}` — **Статус:** {status_text}")
-            response_text = ask_gemini(payload, progress_callback=on_progress)
-            status_placeholder.empty()
-            if response_text.startswith("Ошибка:"):
-                message_placeholder.error(response_text)
-            else:
-                exec_results = execute_bash_blocks(response_text) + execute_web_blocks(response_text)
-                if exec_results:
-                    response_text += "".join(exec_results)
-                message_placeholder.markdown(response_text)
-                ctx.add_model_message(response_text)
+            success, final_text, tool_logs = run_tool_loop(payload, status_placeholder)
+            message_placeholder.markdown(final_text)
+            if tool_logs and st.session_state.show_debug_logs:
+                with st.expander("🛠️ Под капотом (инструменты)", expanded=False):
+                    for log in tool_logs:
+                        st.markdown(log)
+            if success:
+                ctx.add_model_message(final_text)
+                cfg = load_voice_config_ui()
+                if cfg.get("mode") in ["text_voice", "voice_voice"]:
+                    send_to_tts_queue(final_text)
         st.rerun()
+
 
 # --- Боковая панель ---
 st.sidebar.title("✨ Джеми")
-st.sidebar.caption("Персональный ассистент")
+current_ip = get_local_ip()
+st.sidebar.code(f"http://{current_ip}:8501", language="text")
+
+if st.sidebar.button("🔄 Обновить чат", use_container_width=True):
+    ctx.sync_if_modified()
+    st.rerun()
+
+st.sidebar.markdown("---")
+
+# --- Блок гибридного медиаплеера ---
+st.sidebar.subheader("🎵 Плеер")
+player_status = media.get_status()
+state_icon = "⏸️" if player_status["paused"] else ("▶️" if player_status["active"] else "⏹️")
+st.sidebar.caption(f"{state_icon} **{player_status['source']}**\n\n_{player_status['track']}_")
+
+col_prev, col_play, col_next, col_stop = st.sidebar.columns(4)
+with col_prev:
+    if st.button("⏮️", use_container_width=True, help="Предыдущий трек"):
+        media.prev_track()
+        st.rerun()
+with col_play:
+    if st.button("⏯️", use_container_width=True, help="Воспроизведение / Пауза"):
+        media.play_pause()
+        st.rerun()
+with col_next:
+    if st.button("⏭️", use_container_width=True, help="Следующий трек"):
+        media.next_track()
+        st.rerun()
+with col_stop:
+    if st.button("⏹️", use_container_width=True, help="Стоп"):
+        media.stop_all()
+        st.rerun()
+
+# Быстрый поиск и запуск YouTube Music
+yt_query = st.sidebar.text_input("YouTube Music поиск", placeholder="Название трека...")
+if st.sidebar.button("▶️ Включить трек", use_container_width=True):
+    if yt_query.strip():
+        with st.spinner("Ищу и запускаю..."):
+            res = media.search_and_play_ytmusic(yt_query)
+            if res.get("success"):
+                st.sidebar.success(f"Играет: {res['artist']} — {res['title']}")
+                time.sleep(1.0)
+                st.rerun()
+            else:
+                st.sidebar.error(res.get("error", "Ошибка поиска"))
+
+st.sidebar.markdown("---")
+
+# --- Выпадающий список режимов голосового общения ---
+st.sidebar.subheader("🎙️ Голосовой контур")
+voice_cfg = load_voice_config_ui()
+current_mode = voice_cfg.get("mode", "text_text")
+
+mode_options = {
+    "💬 Текст ⇄ 💬 Текст": "text_text",
+    "💬 Текст ⇄ 🔊 Голос": "text_voice",
+    "🎙️ Голос ⇄ 🔊 Голос": "voice_voice",
+    "🎙️ Голос ⇄ 💬 Текст": "voice_text"
+}
+
+reverse_mode_options = {v: k for k, v in mode_options.items()}
+selected_label = st.sidebar.selectbox(
+    "Режим общения",
+    options=list(mode_options.keys()),
+    index=list(mode_options.values()).index(current_mode) if current_mode in mode_options.values() else 0
+)
+
+new_mode = mode_options[selected_label]
+if new_mode != current_mode:
+    voice_cfg["mode"] = new_mode
+    save_voice_config_ui(voice_cfg)
+    st.rerun()
+
 st.sidebar.markdown("---")
 
 health = ctx.get_context_health()
@@ -249,27 +467,43 @@ st.sidebar.progress(health['percentage'] / 100)
 st.sidebar.text(f"Токены: ~{health['tokens']:,} / {health['max_tokens']:,}")
 st.sidebar.markdown("---")
 
-# Кнопка приватного режима
 private_button_label = "👥 Мы не одни" if not st.session_state.private_mode else "👤 Мы одни"
 if st.sidebar.button(private_button_label, use_container_width=True):
     st.session_state.private_mode = not st.session_state.private_mode
     st.rerun()
 
-# Кнопка переключения отображения истории
 history_button_label = "📜 Показать всю историю" if not st.session_state.show_full_history else "📜 Скрыть историю"
 if st.sidebar.button(history_button_label, use_container_width=True):
     st.session_state.show_full_history = not st.session_state.show_full_history
     st.rerun()
 
+debug_button_label = "🔧 Скрыть тех-логи" if st.session_state.show_debug_logs else "🔧 Показать тех-логи"
+if st.sidebar.button(debug_button_label, use_container_width=True):
+    st.session_state.show_debug_logs = not st.session_state.show_debug_logs
+    st.rerun()
+
 st.sidebar.markdown("---")
 
 if st.sidebar.button("👩‍💻 Старшая сестра", use_container_width=True):
-    st.sidebar.info("Модуль кодера готовится к запуску...")
+    sister_url = "http://localhost:8502"
+    if is_port_open(8502):
+        st.sidebar.info("Сестра уже запущена. Открываю браузер...")
+        subprocess.Popen(["xdg-open", sister_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        sister_app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sister", "app.py")
+        subprocess.Popen(
+            [sys.executable, "-m", "streamlit", "run", sister_app_path, "--server.port", "8502", "--server.headless", "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(1.5)
+        subprocess.Popen(["xdg-open", sister_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        st.sidebar.success("Сестра запущена на http://localhost:8502")
 
-if st.sidebar.button("🧠 Анализировать факты о пользователе", use_container_width=True):
-    with st.spinner("Анализирую историю и извлекаю факты..."):
+if st.sidebar.button("🧠 Анализировать факты", use_container_width=True):
+    with st.spinner("Анализирую историю..."):
         facts_manager.run_analysis_if_needed(force=True)
-    st.success("Анализ завершён. Факты обновлены в профиле.")
+    st.success("Анализ завершён.")
     st.rerun()
 
 if st.sidebar.button("🧹 Очистить диалог", use_container_width=True):
@@ -280,9 +514,8 @@ if st.sidebar.button("🛑 Завершить работу", use_container_width
     st.sidebar.write("Завершаю работу...")
     os.system("pkill -f run_widget.py")
 
-# --- Отображение истории сообщений (с учётом приватного режима и сворачивания) ---
+# --- Отображение истории сообщений ---
 if st.session_state.private_mode:
-    # Показываем только два последних сообщения: вопрос пользователя и ответ ассистента
     messages_to_show = ctx.history[-2:]
 else:
     messages_to_show = ctx.history if st.session_state.show_full_history else ctx.history[-10:]
@@ -297,12 +530,28 @@ for message in messages_to_show:
         with st.chat_message(role):
             st.markdown(text)
 
-# --- Ввод пользователя ---
-user_input = st.chat_input("Напиши мне...")
+# --- Уведомление об ошибке распознавания голоса (STT Error) ---
+if os.path.exists(VOICE_ERROR_FILE):
+    st.warning("⚠️ Голосовой ассистент не смог распознать последнюю реплику (шум или сбой сети).")
+    if st.button("🗑️ Очистить ошибку"):
+        try:
+            os.remove(VOICE_ERROR_FILE)
+            st.rerun()
+        except Exception:
+            pass
+
+# --- Ввод пользователя (чат или голос) ---
+chat_input = st.chat_input("Напиши мне...")
+if chat_input:
+    user_input = chat_input
+    st.session_state.active_voice_input_processed = False
+elif user_input:
+    pass # сработало от voice_text выше
+
 if user_input:
+    touch_user_interaction()
     handle_proactive_reaction(user_input)
 
-# Обработка механизма переотправки при сбое
 if "failed_prompt" in st.session_state:
     st.warning(f"⚠️ Ошибка сети. Не отправлено: {st.session_state.failed_prompt}")
     col1, col2, _ = st.columns([1, 1, 4])
@@ -316,7 +565,8 @@ if "failed_prompt" in st.session_state:
             st.rerun()
 
 if user_input:
-    # --- Flash-режим: если промпт начинается с ** ---
+    touch_user_interaction()
+
     if user_input.startswith("**"):
         flash_prompt = user_input[2:].strip()
         if flash_prompt:
@@ -336,16 +586,11 @@ if user_input:
                     message_placeholder.error(response)
                 else:
                     message_placeholder.markdown(response)
-            # Не сохраняем в историю, завершаем обработку
             st.stop()
-        else:
-            st.warning("Пустой flash-запрос. Введите текст после **.")
 
-    # --- Обычная обработка ---
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Fast-Path
     cmd_key = user_input.lower().strip()
     if cmd_key in executor.presets:
         success, result = executor.execute(cmd_key)
@@ -356,48 +601,65 @@ if user_input:
             st.markdown(response_text)
         st.rerun()
 
-    # Обычная обработка через LLM
     ctx.add_user_message(user_input)
     payload = ctx.get_payload(private_mode=st.session_state.private_mode)
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
         message_placeholder = st.empty()
-        def on_progress(model, status_text):
-            status_placeholder.markdown(f"🔄 **Модель:** `{model}` — **Статус:** {status_text}")
-        response_text = ask_gemini(payload, progress_callback=on_progress)
-        status_placeholder.empty()
 
-        if response_text.startswith("Ошибка:"):
-            message_placeholder.error(response_text)
-            # Откатываем последнее user-сообщение, чтобы не было двух подряд
+        success, final_text, tool_logs = run_tool_loop(payload, status_placeholder)
+
+        message_placeholder.markdown(final_text)
+
+        if tool_logs and st.session_state.show_debug_logs:
+            with st.expander("🛠️ Под капотом (инструменты)", expanded=False):
+                for log in tool_logs:
+                    st.markdown(log)
+
+        if not success and final_text.startswith("Ошибка:"):
             if ctx.history and ctx.history[-1]["role"] == "user":
                 ctx.history.pop()
                 ctx.save_history()
             st.session_state.failed_prompt = user_input
             st.rerun()
         else:
-            exec_results = execute_bash_blocks(response_text) + execute_web_blocks(response_text)
-            if exec_results:
-                response_text += "".join(exec_results)
-            message_placeholder.markdown(response_text)
-            ctx.add_model_message(response_text)
+            ctx.add_model_message(final_text)
+            # Отправляем на озвучку, если разрешено настройками
+            cfg = load_voice_config_ui()
+            if cfg.get("mode") in ["text_voice", "voice_voice"]:
+                send_to_tts_queue(final_text)
 
-# --- JavaScript-поллинг: проверка новых проактивных сообщений ---
-js_polling = """
+# --- Автообновление (синхронизация ноут/телефон/голос) ---
+initial_mtime = os.path.getmtime(HISTORY_FILE_PATH) if os.path.exists(HISTORY_FILE_PATH) else 0.0
+
+js_polling = f"""
 <script>
-function checkProactiveStatus() {
-    fetch('http://localhost:8765/proactive_status')
-        .then(response => response.json())
-        .then(data => {
-            if (data.has_new) {
-                window.location.reload();
-            }
-        })
-        .catch(error => console.log('Ошибка проверки статуса:', error));
-}
-setInterval(checkProactiveStatus, 60000);
-checkProactiveStatus();
+(function() {{
+    const topWin = window.parent || window;
+    if (typeof topWin._jemi_mtime === 'undefined') {{
+        topWin._jemi_mtime = {initial_mtime};
+    }}
+
+    function checkSyncStatus() {{
+        const host = topWin.location.hostname || window.location.hostname;
+        fetch('http://' + host + ':8765/proactive_status')
+            .then(response => response.json())
+            .then(data => {{{{
+                if (data.has_new || (data.history_mtime && data.history_mtime > topWin._jemic_mtime)) {{{{
+                    if (data.history_mtime) {{{{
+                        topWin._jemi_mtime = data.history_mtime;
+                    }}}}
+                    topWin.location.reload();
+                }}}}
+            }}}})
+            .catch(error => console.log('Sync polling error:', error));
+    }}
+
+    if (!topWin._jemi_poll_interval) {{
+        topWin._jemi_poll_interval = setInterval(checkSyncStatus, 3000);
+    }}
+}})();
 </script>
 """
 components.html(js_polling, height=0, width=0)

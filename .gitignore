@@ -1,0 +1,21 @@
+# Личные данные и секреты
+config.json
+history.json
+data/active_state.json
+data/instant_snapshot.json
+data/notebook.json
+data/facts_analysis_state.json
+data/proactive_queue.json
+data/proactive_reaction.json
+data/proactive_pending_flag.json
+data/proactive_state.json
+data/interaction_state.json
+logs/
+
+# Кэш Python
+__pycache__/
+*.pyc
+
+# Временные и служебные
+*.pid
+~/

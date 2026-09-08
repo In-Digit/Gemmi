@@ -1,0 +1,32 @@
+{
+  "project_folders": [
+    "/home/mrak/gemini_companion/",
+    "",
+    "",
+    "",
+    ""
+  ],
+  "tree_loaded": true,
+  "selected_paths": [
+    "/home/mrak/gemini_companion/app.py",
+    "/home/mrak/gemini_companion/main.py",
+    "/home/mrak/gemini_companion/run_proactive_daemon.py",
+    "/home/mrak/gemini_companion/run_widget.py",
+    "/home/mrak/gemini_companion/voice_assistant.py",
+    "/home/mrak/gemini_companion/sister/app.py",
+    "/home/mrak/gemini_companion/sister/context_manager_sister.py",
+    "/home/mrak/gemini_companion/sister/llm_client_sister.py",
+    "/home/mrak/gemini_companion/modules/active_state_manager.py",
+    "/home/mrak/gemini_companion/modules/bash_executor.py",
+    "/home/mrak/gemini_companion/modules/context_manager.py",
+    "/home/mrak/gemini_companion/modules/guardrails.py",
+    "/home/mrak/gemini_companion/modules/instant_snapshot.py",
+    "/home/mrak/gemini_companion/modules/llm_client.py",
+    "/home/mrak/gemini_companion/modules/notebook_manager.py",
+    "/home/mrak/gemini_companion/modules/proactive_engine.py",
+    "/home/mrak/gemini_companion/modules/proactive_trigger.py",
+    "/home/mrak/gemini_companion/modules/user_facts_manager.py",
+    "/home/mrak/gemini_companion/modules/web_search.py",
+    "/home/mrak/gemini_companion/config/capabilities.json"
+  ]
+}
